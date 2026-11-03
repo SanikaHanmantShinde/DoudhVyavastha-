@@ -161,6 +161,7 @@ const milkSchema = z.object({
   endReading: z.coerce.number().finite().min(0).max(999999999.999).multipleOf(0.001),
   fat: z.coerce.number().finite().min(0).max(20).multipleOf(0.01),
   snf: z.coerce.number().finite().min(0).max(20).multipleOf(0.01),
+  depositor: z.string().trim().max(120).optional().default(''),
   notes: z.string().trim().max(1000).optional().default(''),
   noSupply: z.boolean().optional().default(false),
 }).refine((value) => value.noSupply
@@ -1563,11 +1564,29 @@ async function saveMilkEntry(req, res, id) {
       return { status: 409, error: 'This collection session is closed. Reopen it before making corrections.' }
     }
 
-    if (id) {
+    const producer = await client.query(
+      'SELECT id, producer_code, name, is_active FROM producers WHERE id = $1 AND dairy_id = $2',
+      [data.producerId, dairyId],
+    )
+    if (!producer.rowCount) return { status: 404, error: 'Producer not found.' }
+
+    let targetId = id
+    if (!targetId) {
+      const priorEntry = await client.query(
+        `SELECT id FROM milk_entries
+         WHERE dairy_id = $1 AND producer_id = $2 AND session_date = $3
+           AND session_type = $4 AND milk_type = $5
+         FOR UPDATE`,
+        [dairyId, producer.rows[0].id, data.sessionDate, data.sessionType, data.milkType],
+      )
+      targetId = priorEntry.rows[0]?.id || null
+    }
+
+    if (targetId) {
       const existingEntry = await client.query(
         `SELECT session_date::text AS session_date, session_type FROM milk_entries
          WHERE dairy_id = $1 AND id = $2 FOR UPDATE`,
-        [dairyId, id],
+        [dairyId, targetId],
       )
       if (!existingEntry.rowCount) return { status: 404, error: 'Milk entry not found.' }
       if (existingEntry.rows[0].session_date !== data.sessionDate
@@ -1576,12 +1595,7 @@ async function saveMilkEntry(req, res, id) {
       }
     }
 
-    const producer = await client.query(
-      'SELECT id, producer_code, name, is_active FROM producers WHERE id = $1 AND dairy_id = $2',
-      [data.producerId, dairyId],
-    )
-    if (!producer.rowCount) return { status: 404, error: 'Producer not found.' }
-    if (!id && !producer.rows[0].is_active) {
+    if (!targetId && !producer.rows[0].is_active) {
       return { status: 409, error: 'This producer is inactive and cannot receive a new milk entry.' }
     }
 
@@ -1614,40 +1628,41 @@ async function saveMilkEntry(req, res, id) {
       collectedAt.toISOString(), data.milkType, data.startReading, data.endReading,
       quantity.toFixed(3), data.fat, data.snf, rate.toFixed(4), amount.toFixed(2),
       rules.rows[0]?.id || null, data.notes, data.sessionDate, data.sessionType,
+      data.depositor,
     ]
 
     let result
-    if (id) {
+    if (targetId) {
       result = await client.query(
         `UPDATE milk_entries SET
           producer_id = $2, producer_code_snapshot = $3, producer_name_snapshot = $4,
           collected_at = $5, milk_type = $6, start_reading = $7, end_reading = $8,
           quantity_litres = $9, fat = $10, snf = $11, rate_per_litre = $12,
           amount = $13, rate_rule_id = $14, notes = $15, session_date = $16,
-          session_type = $17, updated_at = now()
-         WHERE dairy_id = $1 AND id = $18
+          session_type = $17, depositor_name = $18, updated_at = now()
+         WHERE dairy_id = $1 AND id = $19
          RETURNING id, producer_id, producer_code_snapshot, producer_name_snapshot,
            collected_at, milk_type, start_reading, end_reading, quantity_litres,
-           fat, snf, rate_per_litre, amount, notes, session_date, session_type`,
-        [...values, id],
+           fat, snf, rate_per_litre, amount, notes, session_date, session_type, depositor_name`,
+        [...values, targetId],
       )
       if (!result.rowCount) return { status: 404, error: 'Milk entry not found.' }
-      await audit(req, 'UPDATE', 'milk_entry', id, client)
+      await audit(req, 'UPDATE', 'milk_entry', targetId, client)
       return { status: 200, item: result.rows[0] }
     }
     result = await client.query(
       `INSERT INTO milk_entries
         (dairy_id, producer_id, producer_code_snapshot, producer_name_snapshot,
          collected_at, milk_type, start_reading, end_reading, quantity_litres,
-         fat, snf, rate_per_litre, amount, rate_rule_id, notes, session_date, session_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+         fat, snf, rate_per_litre, amount, rate_rule_id, notes, session_date, session_type, depositor_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        RETURNING id, producer_id, producer_code_snapshot, producer_name_snapshot,
          collected_at, milk_type, start_reading, end_reading, quantity_litres,
-         fat, snf, rate_per_litre, amount, notes, session_date, session_type`,
+         fat, snf, rate_per_litre, amount, notes, session_date, session_type, depositor_name`,
       values,
     )
-    await audit(req, 'CREATE', 'milk_entry', result.rows[0].id, client)
-    return { status: 201, item: result.rows[0] }
+    await audit(req, targetId ? 'UPDATE' : 'CREATE', 'milk_entry', result.rows[0].id, client)
+    return { status: targetId ? 200 : 201, item: result.rows[0] }
   })
 
   if (outcome.error) return res.status(outcome.status).json({ error: outcome.error })
@@ -1718,7 +1733,7 @@ app.get('/api/private/milk-entries', async (req, res) => {
     pool.query(
       `SELECT id, producer_id, producer_code_snapshot AS producer_code,
         producer_name_snapshot AS producer_name, collected_at, milk_type, start_reading,
-        end_reading, quantity_litres, fat, snf, rate_per_litre, amount, notes,
+        end_reading, quantity_litres, fat, snf, rate_per_litre, amount, notes, depositor_name,
         session_date, session_type
        FROM milk_entries WHERE ${where} ORDER BY collected_at DESC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -1733,7 +1748,7 @@ app.get('/api/private/milk-entries/:id', async (req, res) => {
   const result = await pool.query(
     `SELECT id, producer_id, producer_code_snapshot AS producer_code,
       producer_name_snapshot AS producer_name, collected_at, milk_type, start_reading,
-      end_reading, quantity_litres, fat, snf, rate_per_litre, amount, notes,
+      end_reading, quantity_litres, fat, snf, rate_per_litre, amount, notes, depositor_name,
       session_date, session_type
      FROM milk_entries WHERE dairy_id = $1 AND id = $2`,
     [req.membership.dairy_id, id],

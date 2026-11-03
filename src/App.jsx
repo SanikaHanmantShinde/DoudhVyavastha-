@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  ArrowDownToLine, BarChart3, CalendarDays, Camera, Check, ChevronRight,
-  CircleHelp, Droplets, FileText, Home, ImagePlus,
+  ArrowDownToLine, BarChart3, CalendarDays, Camera, Check, ChevronRight, Clock3,
+  CircleHelp, Copy, Droplets, FileText, Home, ImagePlus,
   IndianRupee, LogOut, Menu, Milk, Plus, Search, Settings, ShieldCheck, Sprout,
-  Pencil, Upload, Users, X,
+  MessageCircle, Pencil, Printer, Trash2, Upload, Users, X,
 } from 'lucide-react'
 import { BrowserRouter, useLocation, useNavigate } from 'react-router-dom'
 import dairyBackdrop from './assets/dairy-background.jpg'
@@ -30,6 +30,7 @@ const workspaceFeatures = [
   { path: '/feed', icon: Sprout, emoji: '🌾', title: 'Feed inventory', marathi: 'खाद्य व्यवस्थापन', text: 'Track feed issues and balances', theme: 'feed' },
   { path: '/advances', icon: IndianRupee, emoji: '💰', title: 'Advances', marathi: 'उचल', text: 'Manage producer payments', theme: 'accounts' },
   { path: '/reports', icon: FileText, emoji: '🧾', title: 'Reports & bills', marathi: 'अहवाल आणि बिले', text: 'Create statements and reports', theme: 'reports' },
+  { path: '/settings', icon: Settings, emoji: '⚙️', title: 'Dairy settings', marathi: 'डेअरी सेटिंग्ज', text: 'Update your dairy profile', theme: 'settings' },
 ]
 
 const number = (value, fraction = 2) => Number(value || 0).toLocaleString('en-IN', {
@@ -42,6 +43,133 @@ const localDate = (date = new Date()) => [
   String(date.getMonth() + 1).padStart(2, '0'),
   String(date.getDate()).padStart(2, '0'),
 ].join('-')
+
+function escapeXml(value) {
+  return String(value ?? '').replace(/[<>&'"]/g, (character) => ({
+    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;',
+  })[character])
+}
+
+function wrapReceiptText(value, maxLength) {
+  const words = String(value ?? '').split(/\s+/).filter(Boolean)
+  const lines = []
+  let line = ''
+  for (const word of words) {
+    if (line && Array.from(`${line} ${word}`).length > maxLength) {
+      lines.push(line)
+      line = word
+    } else {
+      line = line ? `${line} ${word}` : word
+    }
+  }
+  if (line) lines.push(line)
+  return lines.length ? lines : ['']
+}
+
+function receiptText(value, x, y, maxLength, className, lineHeight = 42) {
+  return wrapReceiptText(value, maxLength).map((line, index) =>
+    `<text class="${className}" x="${x}" y="${y + index * lineHeight}">${escapeXml(line)}</text>`,
+  ).join('')
+}
+
+async function createReceiptPng(entry, dairyName, village, statement, isDraft, date) {
+  const details = [
+    ['दूध प्रकार', entry.milk_type === 'COW' ? 'गाय' : 'म्हैस'],
+    ['मात्रा (लिटर)', `${number(entry.quantity_litres, 3)} लि.`],
+    ['FAT / SNF', `${entry.fat}% / ${entry.snf}%`],
+    ['दर (₹)', `${number(entry.rate_per_litre, 2)} / लि.`],
+    ...(entry.depositor_name ? [['जमाकर्ता', entry.depositor_name]] : []),
+  ]
+  const dairyLines = wrapReceiptText(dairyName, 36)
+  const subtitleY = 74 + dairyLines.length * 45
+  const headerHeight = Math.max(250, subtitleY + 80)
+  const metaTop = headerHeight + 24
+  const producerLabelY = metaTop + 122
+  const detailTop = metaTop + 226
+  const detailRows = details.map(([label, value]) => ({
+    label,
+    value,
+    height: Math.max(64, 70 + (wrapReceiptText(value, 38).length - 1) * 38),
+  }))
+  const amountTop = detailTop + detailRows.reduce((total, row) => total + row.height, 0) + 20
+  const thanksTop = amountTop + 165
+  const totalsTop = thanksTop + 110
+  const height = totalsTop + 185
+  const entryDate = String(entry.session_date || date).slice(0, 10)
+  const sessionDate = new Date(`${entryDate}T00:00:00`).toLocaleDateString('mr-IN')
+  const quantityTotal = Number(statement?.totals.quantity || 0) + (isDraft ? Number(entry.quantity_litres) : 0)
+  const amountTotal = Number(statement?.totals.milkAmount || 0) + (isDraft ? Number(entry.amount) : 0)
+  let detailOffset = detailTop
+  const detailMarkup = detailRows.map(({ label, value, height: rowHeight }) => {
+    const y = detailOffset
+    detailOffset += rowHeight
+    return `<line x1="64" y1="${y + 22}" x2="896" y2="${y + 22}" stroke="#e0ece9" stroke-width="2"/>
+      <text class="label" x="64" y="${y + 58}">${escapeXml(label)}</text>
+      ${receiptText(value, 896, y + 58, 38, 'value', 38)}`
+  }).join('')
+  const dairyMarkup = dairyLines.map((line, index) =>
+    `<text class="brand" x="480" y="${74 + index * 45}">${escapeXml(line)}</text>`,
+  ).join('')
+  const producerMarkup = receiptText(`${entry.producer_name} · ${entry.producer_code}`, 64, producerLabelY + 24, 42, 'producer', 40)
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="${height}" viewBox="0 0 960 ${height}">
+    <defs><linearGradient id="header" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#00968a"/><stop offset="1" stop-color="#00695c"/></linearGradient></defs>
+    <rect width="960" height="${height}" rx="28" fill="#ffffff"/>
+    <rect width="960" height="${headerHeight}" rx="28" fill="url(#header)"/>
+    ${dairyMarkup}
+    <text class="subtitle" x="480" y="${subtitleY}">${escapeXml(village || 'डेअरी')}</text>
+    <text class="receipt-title" x="480" y="${Math.max(215, subtitleY + 52)}">🥛 दूध संकलन पावती</text>
+    <rect x="48" y="${metaTop}" width="864" height="78" rx="18" fill="#eef7f5"/>
+    <text class="meta" x="76" y="${metaTop + 49}">${escapeXml(sessionDate)}</text>
+    <text class="meta" x="884" y="${metaTop + 49}" text-anchor="end">${entry.session_type === 'MORNING' ? '☀️ सकाळ' : '🌙 संध्याकाळ'}</text>
+    <text class="section" x="64" y="${producerLabelY}">शेतकरी</text>
+    ${producerMarkup}
+    ${detailMarkup}
+    <rect x="48" y="${amountTop}" width="864" height="112" rx="20" fill="#e7f5ef"/>
+    <text class="amount-label" x="480" y="${amountTop + 45}">एकूण रक्कम</text>
+    <text class="amount" x="480" y="${amountTop + 91}">₹ ${escapeXml(number(entry.amount))}</text>
+    <text class="thanks" x="480" y="${thanksTop}">धन्यवाद!</text>
+    <text class="green" x="480" y="${thanksTop + 42}">🌳 कागद वाचवा, झाडे वाचवा 🌳</text>
+    <rect x="48" y="${totalsTop}" width="864" height="128" rx="18" fill="url(#header)"/>
+    <text class="total-label" x="82" y="${totalsTop + 48}">महिन्याचे एकूण दूध</text>
+    <text class="total-value" x="878" y="${totalsTop + 48}" text-anchor="end">${escapeXml(number(quantityTotal, 3))} लि.</text>
+    <text class="total-label" x="82" y="${totalsTop + 98}">महिन्याची एकूण रक्कम</text>
+    <text class="total-value" x="878" y="${totalsTop + 98}" text-anchor="end">₹ ${escapeXml(number(amountTotal))}</text>
+    <style>
+      text { font-family: "Nirmala UI", "Noto Sans Devanagari", sans-serif; text-anchor: middle; }
+      .brand { fill: #fff; font-size: 40px; font-weight: 800; }
+      .subtitle { fill: #e2f4ef; font-size: 24px; }
+      .receipt-title { fill: #fff; font-size: 28px; font-weight: 700; }
+      .meta { fill: #23564d; font-size: 25px; font-weight: 700; }
+      .section { fill: #578078; font-size: 21px; text-anchor: start; }
+      .producer { fill: #173c36; font-size: 30px; font-weight: 750; text-anchor: start; }
+      .label { fill: #56706c; font-size: 23px; text-anchor: start; }
+      .value { fill: #12302d; font-size: 23px; font-weight: 700; text-anchor: end; }
+      .amount-label { fill: #337b5e; font-size: 22px; font-weight: 700; }
+      .amount { fill: #00695c; font-size: 42px; font-weight: 800; }
+      .thanks { fill: #22653e; font-size: 30px; font-weight: 800; }
+      .green { fill: #2e7d32; font-size: 20px; }
+      .total-label { fill: #e2f4ef; font-size: 23px; text-anchor: start; }
+      .total-value { fill: #fff; font-size: 25px; font-weight: 800; }
+    </style>
+  </svg>`
+  const imageUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }))
+  try {
+    const image = new Image()
+    image.src = imageUrl
+    await image.decode()
+    const canvas = document.createElement('canvas')
+    canvas.width = 960
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('Could not render the receipt image.')
+    context.drawImage(image, 0, 0)
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+    if (!blob) throw new Error('Could not create the receipt image.')
+    return blob
+  } finally {
+    URL.revokeObjectURL(imageUrl)
+  }
+}
 
 function Logo({ name = 'DoudhVyavastha', compact = false }) {
   return (
@@ -251,8 +379,10 @@ function AppLayout({ user, onLogout, onProfile }) {
         <div className="sidebar-spacer" />
         <div className="sidebar-help"><div className="help-icon"><CircleHelp size={17} /></div><div><strong>डेअरी व्यवस्थापन</strong><span>संकलन, उत्पादक आणि हिशोब</span></div><ChevronRight size={15} /></div>
         <div className="sidebar-user">
-          <UserAvatar user={user} />
-          <div className="user-copy"><strong>{user.fullName}</strong><span>{user.role === 'OWNER' ? 'Dairy owner' : 'Dairy staff'}</span></div>
+          <button type="button" className="sidebar-profile-link" onClick={() => navigateTo('/settings')} aria-label="प्रोफाइल सेटिंग्ज उघडा">
+            <UserAvatar user={user} />
+            <span className="user-copy"><strong>{user.fullName}</strong><small>{user.dairy.displayName}</small><span>{user.role === 'OWNER' ? 'Dairy owner' : 'Dairy staff'}</span></span>
+          </button>
           <button className="icon-button sidebar-logout" aria-label="Sign out" title="Sign out" onClick={onLogout}><LogOut size={17} /></button>
         </div>
       </aside>
@@ -275,7 +405,7 @@ function AppLayout({ user, onLogout, onProfile }) {
             <div className="page-date-label"><CalendarDays size={15} /> {new Date(date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</div>
           </div>}
           {!isDashboard && !isProducers && <PageFeatureBanner page={page} />}
-          <PageContent path={location.pathname} user={user} date={date} onProfile={onProfile} />
+          <PageContent path={location.pathname} user={user} date={date} onProfile={onProfile} onDateChange={setDate} />
         </section>
       </main>
     </div>
@@ -305,6 +435,21 @@ function PageFeatureBanner({ page }) {
         <span className="page-art-caption">{page.english}</span>
       </div>
     </section>
+  )
+}
+
+function DairyModuleHeader({ emoji, title, subtitle, meta }) {
+  return (
+    <header className="dairy-module-header">
+      <div className="dairy-module-brand">
+        <span aria-hidden="true">{emoji}</span>
+        <div><h1>{title}</h1><p>{subtitle}</p></div>
+      </div>
+      {meta && <div className="dairy-module-meta">{meta}</div>}
+      <svg viewBox="0 0 1200 26" preserveAspectRatio="none" aria-hidden="true">
+        <path d="M0 14 C180 28 320 0 500 14 S820 28 1000 14 S1120 6 1200 14 V26 H0 Z" />
+      </svg>
+    </header>
   )
 }
 
@@ -658,9 +803,10 @@ function FeedPage() {
   const [issueTotal, setIssueTotal] = useState('0')
   const [from, setFrom] = useState(() => localDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1)))
   const [to, setTo] = useState(() => localDate())
-  const [issueOpen, setIssueOpen] = useState(false)
   const [issueBusy, setIssueBusy] = useState(false)
   const [issueError, setIssueError] = useState('')
+  const [issueSuccess, setIssueSuccess] = useState('')
+  const [feedProducerCode, setFeedProducerCode] = useState('')
   const [feedSelection, setFeedSelection] = useState('')
   const [quantity, setQuantity] = useState('')
   const [issueRate, setIssueRate] = useState('')
@@ -682,17 +828,24 @@ function FeedPage() {
     return () => { active = false }
   }, [from, to, reload])
   const selectedFeed = feeds.find((item) => item.id === feedSelection)
+  const selectedFeedProducer = producers.find((producer) => producer.producer_code.toLowerCase() === feedProducerCode.trim().toLowerCase())
   async function saveIssue(event) {
     event.preventDefault()
+    if (!selectedFeedProducer) {
+      setIssueError('उत्पादकाचा योग्य कोड निवडा.')
+      return
+    }
     setIssueBusy(true)
     setIssueError('')
+    setIssueSuccess('')
     const data = Object.fromEntries(new FormData(event.currentTarget).entries())
     try {
       await api('/private/feed-issues', {
         method: 'POST',
         body: JSON.stringify({ ...data, quantity: Number(data.quantity), ratePerUnit: Number(data.ratePerUnit) }),
       })
-      setIssueOpen(false)
+      setIssueSuccess('खाद्य नोंद जतन झाली ✅')
+      setFeedProducerCode('')
       setFeedSelection('')
       setQuantity('')
       setIssueRate('')
@@ -703,28 +856,39 @@ function FeedPage() {
       setIssueBusy(false)
     }
   }
-  return <>
+  return <div className="dairy-module-screen feed-module-screen">
   {issueError && <Notice message={issueError} />}
-  <section className="ledger-hero feed-ledger-hero"><div className="ledger-hero-icon">🌾</div><div><p className="section-kicker">FEED & PRODUCER DEDUCTIONS</p><h2>Feed issue ledger</h2><p>Record feed given to producers. Each issue keeps its own rate and value for accurate settlement.</p></div><div className="ledger-hero-total"><span>ISSUED IN SELECTED PERIOD</span><strong>₹{number(issueTotal)}</strong></div></section>
-  <div className="ledger-panel-heading"><div><p className="section-kicker">INVENTORY</p><h2>Feed items & rates</h2></div><span>Update feed inventory below; issue-time rates stay saved in the ledger.</span></div>
+  <DairyModuleHeader emoji="🌾" title="खाद्य मास्टर" subtitle="उत्पादकांना खाद्य नोंदवा आणि दर सांभाळा" meta={<span>या कालावधीतील कपात <strong>₹{number(issueTotal)}</strong></span>} />
+  <form id="feed-issue-form" className="dairy-entry-form" onSubmit={saveIssue}>
+    <section className="dairy-entry-card">
+      <div className="dairy-entry-card-title"><span>📦</span><div><h2>खाद्य नोंदणी</h2><p>उत्पादक आणि खाद्य तपशील भरा</p></div></div>
+      <div className="dairy-entry-grid">
+        <label><span>🔢 उत्पादक कोड</span><input value={feedProducerCode} onChange={(event) => setFeedProducerCode(event.target.value)} list="feed-producer-codes" placeholder="उदा. 101" autoComplete="off" /></label>
+        <label><span>👤 उत्पादकाचे नाव</span><input value={selectedFeedProducer?.name || ''} readOnly placeholder="कोड निवडा" /></label>
+        <datalist id="feed-producer-codes">{producers.map((producer) => <option value={producer.producer_code} key={producer.id}>{producer.name}</option>)}</datalist>
+        <input type="hidden" name="producerId" value={selectedFeedProducer?.id || ''} />
+        <label><span>🌾 खाद्याचे नाव</span><select name="feedItemId" required value={feedSelection} onChange={(event) => { setFeedSelection(event.target.value); setIssueRate(feeds.find((item) => item.id === event.target.value)?.rate || '') }}><option value="">खाद्य निवडा</option>{feeds.map((feed) => <option key={feed.id} value={feed.id}>{feed.name} · ₹{number(feed.rate)}/{feed.unit}</option>)}</select></label>
+        <label><span>📅 दिनांक</span><input type="date" name="issueDate" required defaultValue={localDate()} /></label>
+        <label><span>⚖️ प्रमाण ({selectedFeed?.unit || 'एकक'})</span><input name="quantity" type="number" step="0.001" min="0.001" required value={quantity} onChange={(event) => setQuantity(event.target.value)} placeholder="0.00" /></label>
+        <label><span>💰 दर (₹ / {selectedFeed?.unit || 'एकक'})</span><input name="ratePerUnit" type="number" step="0.01" min="0" required value={issueRate} onChange={(event) => setIssueRate(event.target.value)} placeholder="0.00" /></label>
+        <label className="dairy-entry-wide"><span>नोंद / Remarks</span><input name="remarks" placeholder="ऐच्छिक" /></label>
+      </div>
+      <div className="dairy-entry-total"><span>उत्पादक कपात</span><strong>₹{number((Number(quantity) || 0) * (Number(issueRate) || 0))}</strong></div>
+      {issueError && <Notice message={issueError} />}{issueSuccess && <Notice message={issueSuccess} success />}
+    </section>
+  </form>
+  <div className="dairy-entry-actions"><button type="button" className="dairy-action-primary" form="feed-issue-form" onClick={() => document.getElementById('feed-issue-form')?.requestSubmit()} disabled={issueBusy || !feeds.length || !producers.length}>{issueBusy ? 'जतन होत आहे…' : 'माहिती जतन करा'} ✅</button><button type="button" className="dairy-action-secondary" onClick={() => document.getElementById('feed-issue-ledger')?.scrollIntoView({ behavior: 'smooth' })}>खाद्य यादी पहा 📋</button></div>
+  <section id="feed-inventory" className="dairy-module-section"><div className="dairy-module-section-heading"><div><p>INVENTORY</p><h2>खाद्य प्रकार आणि दर</h2></div><span>जारी केलेल्या नोंदींचा दर बदलत नाही.</span></div>
   <CrudPage title="feed items" endpoint="/private/feed-items" fields={feedFields} itemKey="feed item" emptyTitle="No feed items yet" emptyText="Add the feed products used at your dairy." columns={[
     { key: 'item_code', label: 'ITEM CODE', render: (item) => <strong className="code-cell">{item.item_code}</strong> },
     { key: 'name', label: 'FEED ITEM' }, { key: 'rate', label: 'RATE', render: (item) => `₹${number(item.rate)}` },
     { key: 'unit', label: 'UNIT' }, { key: 'description', label: 'DESCRIPTION' },
-  ]} />
-  <section className="panel data-panel feed-issue-panel">
-    <div className="ledger-panel-heading"><div><p className="section-kicker">PRODUCER ISSUE HISTORY</p><h2>Feed issues · खाद्य नोंद</h2></div><div className="ledger-toolbar"><label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>To<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label><button className="button button-primary" onClick={() => { setIssueError(''); setIssueOpen(true) }} disabled={!feeds.length || !producers.length}><Plus size={16} /> Issue feed</button></div></div>
+  ]} /></section>
+  <section id="feed-issue-ledger" className="panel data-panel feed-issue-panel dairy-module-section">
+    <div className="ledger-panel-heading"><div><p className="section-kicker">PRODUCER ISSUE HISTORY</p><h2>खाद्य कपात · Issue history</h2></div><div className="ledger-toolbar"><label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>To<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label></div></div>
     {!issues.length ? <EmptyState title="No feed issues in this period" text="Add a feed item and an active producer, then record an issue here." /> : <div className="table-scroll"><table><thead><tr><th>DATE</th><th>PRODUCER</th><th>FEED ITEM</th><th>QUANTITY</th><th>RATE / UNIT</th><th>DEDUCTION</th><th>REMARKS</th></tr></thead><tbody>{issues.map((item) => <tr key={item.id}><td>{item.issue_date}</td><td><strong>{item.producer_name}</strong><small className="table-sub">#{item.producer_code}</small></td><td>{item.feed_name}</td><td>{number(item.quantity, 3)} {item.unit}</td><td>₹{number(item.rate_per_unit)}</td><td><strong>₹{number(item.amount)}</strong></td><td>{item.remarks || '—'}</td></tr>)}</tbody></table></div>}
   </section>
-  {issueOpen && <Modal title="Issue feed to producer · खाद्य द्या" onClose={() => setIssueOpen(false)}><form className="form-stack modal-form" onSubmit={saveIssue}><div className="field-grid">
-    <label>Producer<select name="producerId" required defaultValue=""><option value="" disabled>Select producer</option>{producers.map((producer) => <option key={producer.id} value={producer.id}>{producer.producer_code} · {producer.name}</option>)}</select></label>
-    <label>Feed item<select name="feedItemId" required value={feedSelection} onChange={(event) => { setFeedSelection(event.target.value); setIssueRate(feeds.find((item) => item.id === event.target.value)?.rate || '') }}><option value="" disabled>Select feed item</option>{feeds.map((feed) => <option key={feed.id} value={feed.id}>{feed.name} · ₹{number(feed.rate)}/{feed.unit}</option>)}</select></label>
-    <label>Issue date<input type="date" name="issueDate" required defaultValue={localDate()} /></label>
-    <label>Quantity ({selectedFeed?.unit || 'unit'})<input name="quantity" type="number" step="0.001" min="0.001" required value={quantity} onChange={(event) => setQuantity(event.target.value)} /></label>
-    <label>Rate per {selectedFeed?.unit || 'unit'} (₹)<input name="ratePerUnit" type="number" step="0.01" min="0" required value={issueRate} onChange={(event) => setIssueRate(event.target.value)} /></label>
-    <label className="field-wide">Remarks<input name="remarks" placeholder="Optional notes" /></label>
-  </div><div className="statement-inline-total"><span>Estimated producer deduction</span><strong>₹{number((Number(quantity) || 0) * (Number(issueRate) || 0))}</strong></div>{issueError && <Notice message={issueError} />}<div className="modal-actions"><button type="button" className="button button-quiet" onClick={() => setIssueOpen(false)}>Cancel</button><button className="button button-primary" disabled={issueBusy || !feeds.length || !producers.length}>{issueBusy ? 'Saving issue…' : 'Save feed issue'} <Check size={16} /></button></div></form></Modal>}
-  </>
+  </div>
 }
 
 function AdvancesPage() {
@@ -735,7 +899,9 @@ function AdvancesPage() {
   const [from, setFrom] = useState(() => localDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1)))
   const [to, setTo] = useState(() => localDate())
   const [filter, setFilter] = useState('all')
-  const [formType, setFormType] = useState('')
+  const [formType, setFormType] = useState('advance')
+  const [producerCode, setProducerCode] = useState('')
+  const [formKey, setFormKey] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [reload, setReload] = useState(0)
@@ -758,6 +924,10 @@ function AdvancesPage() {
   }, [from, to, reload])
   async function saveTransaction(event) {
     event.preventDefault()
+    if (!selectedProducer) {
+      setError('उत्पादकाचा योग्य कोड निवडा.')
+      return
+    }
     setBusy(true)
     setError('')
     const values = Object.fromEntries(new FormData(event.currentTarget).entries())
@@ -768,7 +938,9 @@ function AdvancesPage() {
         method: 'POST',
         body: JSON.stringify({ producerId: values.producerId, [dateField]: values.date, amount: Number(values.amount), remarks: values.remarks }),
       })
-      setFormType('')
+      setError(formType === 'advance' ? 'उचल नोंद जतन झाली ✅' : 'पेमेंट नोंद जतन झाली ✅')
+      setProducerCode('')
+      setFormKey((value) => value + 1)
       setReload((value) => value + 1)
     } catch (cause) {
       setError(cause.message)
@@ -787,24 +959,36 @@ function AdvancesPage() {
     ...(filter !== 'payments' ? advances.map((item) => ({ ...item, kind: 'advance' })) : []),
     ...(filter !== 'advances' ? payments.map((item) => ({ ...item, kind: 'payment', advance_date: item.payment_date })) : []),
   ].sort((a, b) => String(b.advance_date || b.payment_date).localeCompare(String(a.advance_date || a.payment_date)))
-  return <>
-    {error && <Notice message={error} />}
-    <section className="ledger-hero advance-ledger-hero"><div className="ledger-hero-icon">💰</div><div><p className="section-kicker">PRODUCER ACCOUNTING</p><h2>उचल व पेमेंट · Advances & payments</h2><p>Record cash advances and settlements. Payments are limited by the actual outstanding producer balance.</p></div><div className="ledger-hero-actions"><button className="button button-secondary" onClick={() => { setError(''); setFormType('advance') }} disabled={!producers.length}><Plus size={15} /> Record advance</button><button className="button button-primary" onClick={() => { setError(''); setFormType('payment') }} disabled={!producers.length}><IndianRupee size={15} /> Record payment</button></div></section>
-    <section className="panel data-panel balances-panel"><div className="ledger-panel-heading"><div><p className="section-kicker">LIVE ACCOUNT POSITION</p><h2>Producer outstanding balances</h2></div><span>Milk value less feed issues, active advances and payments</span></div>
+  const selectedProducer = producers.find((producer) => producer.producer_code.toLowerCase() === producerCode.trim().toLowerCase())
+  return <div className="dairy-module-screen advance-module-screen">
+    {error && <Notice message={error} success={error.includes('जतन झाली')} />}
+    <DairyModuleHeader emoji="💸" title="उचल नोंदणी" subtitle="उत्पादकांची उचल आणि पेमेंट नोंदवा" meta={<span>वर्तमान कालावधी <strong>{from} – {to}</strong></span>} />
+    <form key={formKey} id="advance-entry-form" className="dairy-entry-form" onSubmit={saveTransaction}>
+      <section className="dairy-entry-card">
+        <div className="dairy-entry-card-title"><span>{formType === 'advance' ? '💸' : '✅'}</span><div><h2>{formType === 'advance' ? 'उचल नोंदणी' : 'पेमेंट नोंदणी'}</h2><p>उत्पादक कोडनुसार व्यवहार जतन होईल</p></div></div>
+        <div className="dairy-entry-grid">
+          <label><span>🔢 उत्पादक कोड</span><input value={producerCode} onChange={(event) => setProducerCode(event.target.value)} list="advance-producer-codes" placeholder="उदा. 101" autoComplete="off" /></label>
+          <label><span>👤 उत्पादकाचे नाव</span><input value={selectedProducer?.name || ''} readOnly placeholder="कोड निवडा" /></label>
+          <datalist id="advance-producer-codes">{producers.map((producer) => <option value={producer.producer_code} key={producer.id}>{producer.name}</option>)}</datalist>
+          <input type="hidden" name="producerId" value={selectedProducer?.id || ''} />
+          <div className="dairy-mode-switch" role="group" aria-label="व्यवहाराचा प्रकार"><button type="button" className={formType === 'advance' ? 'is-selected' : ''} onClick={() => { setError(''); setFormType('advance') }}>💸 उचल</button><button type="button" className={formType === 'payment' ? 'is-selected' : ''} onClick={() => { setError(''); setFormType('payment') }}>✅ पेमेंट</button></div>
+          <label><span>📅 दिनांक</span><input type="date" name="date" required defaultValue={localDate()} /></label>
+          <label className="dairy-entry-amount"><span>{formType === 'advance' ? '💰 उचल रक्कम (₹)' : '💳 पेमेंट रक्कम (₹)'}</span><input type="number" name="amount" min="0.01" step="0.01" required placeholder="0.00" /></label>
+          <label className="dairy-entry-wide"><span>नोंद / Remarks</span><input name="remarks" placeholder="ऐच्छिक" /></label>
+        </div>
+        {formType === 'payment' && <p className="dairy-entry-note">पेमेंटची रक्कम serverवरील उत्पादकाच्या बाकीपेक्षा जास्त स्वीकारली जाणार नाही.</p>}
+      </section>
+    </form>
+    <div className="dairy-entry-actions"><button type="submit" form="advance-entry-form" className="dairy-action-primary" disabled={busy || !producers.length}>{busy ? 'जतन होत आहे…' : formType === 'advance' ? 'उचल जतन करा' : 'पेमेंट जतन करा'} ✅</button><button type="button" className="dairy-action-secondary" onClick={() => document.getElementById('advance-ledger')?.scrollIntoView({ behavior: 'smooth' })}>उचल यादी पहा 📋</button></div>
+    <section className="panel data-panel balances-panel dairy-module-section"><div className="ledger-panel-heading"><div><p className="section-kicker">LIVE ACCOUNT POSITION</p><h2>उत्पादकांची बाकी</h2></div><span>दूध − खाद्य − उचल − पेमेंट</span></div>
       {!balances.length ? <EmptyState title="No active producer balances" text="Add producers and record milk to see their current balance." /> : <div className="balance-card-grid">{balances.map((item) => <article className={`balance-card ${Number(item.balance) < 0 ? 'balance-negative' : ''}`} key={item.id}><div className="balance-avatar">{item.name.slice(0, 1)}</div><div className="balance-producer"><strong>{item.name}</strong><small>#{item.producer_code}</small></div><div className="balance-amount"><small>OUTSTANDING</small><strong>₹{number(item.balance)}</strong></div></article>)}</div>}
     </section>
-    <section className="panel data-panel">
+    <section id="advance-ledger" className="panel data-panel dairy-module-section">
       <div className="ledger-panel-heading"><div><p className="section-kicker">CASH MOVEMENT</p><h2>Advance & payment ledger</h2></div><div className="ledger-toolbar"><label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>To<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label></div></div>
       <div className="rate-type-filters ledger-tabs"><button className={filter === 'all' ? 'rate-filter-active' : ''} onClick={() => setFilter('all')}>All transactions</button><button className={filter === 'advances' ? 'rate-filter-active' : ''} onClick={() => setFilter('advances')}>💸 Advances</button><button className={filter === 'payments' ? 'rate-filter-active' : ''} onClick={() => setFilter('payments')}>✅ Payments</button></div>
       {!rows.length ? <EmptyState title="No transactions in this period" text="Record a producer advance or payment to begin the ledger." /> : <div className="table-scroll"><table><thead><tr><th>DATE</th><th>TYPE</th><th>PRODUCER</th><th>AMOUNT</th><th>REMARKS</th><th>STATUS / ACTION</th></tr></thead><tbody>{rows.map((item) => <tr key={`${item.kind}-${item.id}`}><td>{item.advance_date || item.payment_date}</td><td><span className={`ledger-type-pill ${item.kind}`}>{item.kind === 'advance' ? '💸 Advance' : '✅ Payment'}</span></td><td><strong>{item.producer_name}</strong><small className="table-sub">#{item.producer_code}</small></td><td><strong>₹{number(item.amount)}</strong></td><td>{item.remarks || '—'}</td><td>{item.kind === 'advance' ? item.voided_at ? <span className="voided-label">Voided</span> : <button className="small-action danger" onClick={() => voidAdvance(item)}>Void entry</button> : <span className="paid-label">Paid</span>}</td></tr>)}</tbody></table></div>}
     </section>
-    {formType && <Modal title={formType === 'advance' ? 'Record producer advance · उचल नोंद' : 'Record producer payment · पेमेंट नोंद'} onClose={() => setFormType('')}><form className="form-stack modal-form" onSubmit={saveTransaction}><div className="field-grid">
-      <label className="field-wide">Producer<select name="producerId" required defaultValue=""><option value="" disabled>Select producer</option>{producers.map((producer) => <option value={producer.id} key={producer.id}>{producer.producer_code} · {producer.name}</option>)}</select></label>
-      <label>{formType === 'advance' ? 'Advance date' : 'Payment date'}<input type="date" name="date" required defaultValue={localDate()} /></label>
-      <label>Amount (₹)<input type="number" name="amount" min="0.01" step="0.01" required placeholder="0.00" /></label>
-      <label className="field-wide">Remarks<input name="remarks" placeholder="Optional notes or receipt number" /></label>
-    </div>{formType === 'payment' && <div className="form-note">The server verifies the selected producer’s outstanding balance before accepting this payment. Current balances are shown on the page above.</div>}{error && <Notice message={error} />}<div className="modal-actions"><button type="button" className="button button-quiet" onClick={() => setFormType('')}>Cancel</button><button className="button button-primary" disabled={busy}>{busy ? 'Saving…' : formType === 'advance' ? 'Save advance' : 'Save payment'} <Check size={16} /></button></div></form></Modal>}
-  </>
+  </div>
 }
 
 function buildRatePreviewMatrix(rows) {
@@ -902,60 +1086,93 @@ function RatesPage() {
   </>
 }
 
-function MilkPage({ date }) {
+function MilkPage({ date, onDateChange, dairyName, village }) {
   const location = useLocation()
+  const navigate = useNavigate()
   const [entries, setEntries] = useState([])
   const [total, setTotal] = useState(0)
   const [producers, setProducers] = useState([])
   const [sessions, setSessions] = useState([])
-  const [sessionType, setSessionType] = useState(() => new URLSearchParams(location.search).get('session') === 'EVENING' ? 'EVENING' : 'MORNING')
-  const [dailyTotals, setDailyTotals] = useState(null)
-  const [formOpen, setFormOpen] = useState(false)
+  const [page, setPage] = useState(1)
+  const [sessionType, setSessionType] = useState(() => {
+    const requested = new URLSearchParams(location.search).get('session')
+    return requested === 'EVENING' || (!requested && new Date().getHours() >= 12) ? 'EVENING' : 'MORNING'
+  })
+  const [producerCode, setProducerCode] = useState('')
+  const [formOpen, setFormOpen] = useState(true)
   const [formItem, setFormItem] = useState(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [photoBusy, setPhotoBusy] = useState(false)
   const [dateTimeValue, setDateTimeValue] = useState('')
-  const [quoteInput, setQuoteInput] = useState(null)
+  const [quoteInput, setQuoteInput] = useState(() => ({
+    sessionDate: date,
+    sessionType: new URLSearchParams(location.search).get('session') === 'EVENING' || (!new URLSearchParams(location.search).get('session') && new Date().getHours() >= 12) ? 'EVENING' : 'MORNING',
+    milkType: 'COW',
+    startReading: '0',
+    endReading: '10',
+    quantityLitres: '10',
+    fat: '3.5',
+    snf: '8.5',
+    depositor: '',
+    noSupply: false,
+  }))
   const [quote, setQuote] = useState(null)
   const [quoteError, setQuoteError] = useState('')
   const [quoteBusy, setQuoteBusy] = useState(false)
-  const [page, setPage] = useState(1)
-  const [search, setSearch] = useState('')
-  const [milkType, setMilkType] = useState('')
-  const [from, setFrom] = useState('')
-  const [to, setTo] = useState('')
+  const [clock, setClock] = useState(() => new Date())
+  const [toast, setToast] = useState('')
+  const [celebrating, setCelebrating] = useState(false)
+  const [receiptEntry, setReceiptEntry] = useState(null)
+  const [receiptIsDraft, setReceiptIsDraft] = useState(false)
+  const [receiptAfterSave, setReceiptAfterSave] = useState(false)
+  const [receiptStatement, setReceiptStatement] = useState(null)
+  const [receiptBusy, setReceiptBusy] = useState(false)
+  const [receiptError, setReceiptError] = useState('')
+  const [receiptShareMessage, setReceiptShareMessage] = useState('')
+  const [receiptShareBusy, setReceiptShareBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
   const selectedSession = sessions.find((session) => session.session_type === sessionType)
+  const selectedProducer = producers.find((producer) => producer.producer_code.toLowerCase() === producerCode.trim().toLowerCase())
+  const milkFillPercent = Math.min(100, Math.max(0, (Number(quote?.quantity || 0) / 25) * 100))
+  const greeting = clock.getHours() < 12 ? 'शुभ सकाळ' : clock.getHours() < 17 ? 'शुभ दुपार' : 'शुभ संध्याकाळ'
   const refresh = useCallback(() => {
-    const query = new URLSearchParams()
-    if (from) query.set('from', from)
-    if (to) query.set('to', to)
-    if (search) query.set('search', search)
-    if (milkType) query.set('milkType', milkType)
-    if (sessionType) query.set('sessionType', sessionType)
+    const query = new URLSearchParams({ from: date, to: date })
     query.set('page', String(page))
     query.set('limit', '20')
     return api(`/private/milk-entries?${query}`).then((data) => {
       setEntries(data.items)
       setTotal(data.total)
     })
-  }, [from, milkType, page, search, sessionType, to])
+  }, [date, page])
 
   const refreshSessions = useCallback(() => api(`/private/sessions?date=${date}`)
     .then((data) => setSessions(data.sessions)), [date])
-  const refreshDailyTotals = useCallback(() => api(`/private/dashboard?date=${date}`)
-    .then((data) => setDailyTotals(data.totals)), [date])
 
   useEffect(() => {
-    Promise.all([refresh(), refreshSessions(), api('/private/producers')])
-      .then(([, , data]) => setProducers(data.items.filter((producer) => producer.is_active)))
+    Promise.all([refresh(), refreshSessions(), api('/private/producers?limit=100')])
+      .then(([, , data]) => {
+        const activeProducers = data.items.filter((producer) => producer.is_active)
+        setProducers(activeProducers)
+        setProducerCode((current) => current || activeProducers[0]?.producer_code || '')
+      })
       .catch((cause) => setError(cause.message))
   }, [refresh, refreshSessions])
 
   useEffect(() => {
-    let active = true
-    refreshDailyTotals().catch((cause) => { if (active) setError(cause.message) })
-    return () => { active = false }
-  }, [refreshDailyTotals])
+    setQuoteInput((previous) => previous ? { ...previous, sessionDate: date } : previous)
+  }, [date])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(new Date()), 30000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    if (!toast && !celebrating) return undefined
+    const timer = window.setTimeout(() => { setToast(''); setCelebrating(false) }, 2600)
+    return () => window.clearTimeout(timer)
+  }, [toast, celebrating])
 
   useEffect(() => {
     if (!formOpen || !quoteInput) return undefined
@@ -1020,20 +1237,160 @@ function MilkPage({ date }) {
 
   async function save(event) {
     event.preventDefault()
+    if (!selectedProducer) {
+      setToast('उत्पादकाचा योग्य कोड निवडा')
+      return
+    }
+    if (!quote || quoteBusy || quoteError) {
+      setToast('योग्य FAT/SNF आणि दरपत्रक तपासा')
+      return
+    }
     const formData = new FormData(event.currentTarget)
     const data = Object.fromEntries(formData.entries())
     data.noSupply = formData.get('noSupply') === 'on'
+    if (data.noSupply) data.endReading = data.startReading
+    else data.endReading = (Number(data.startReading) + Number(data.quantityLitres)).toFixed(3)
+    delete data.quantityLitres
     data.collectedAt = new Date(data.collectedAt).toISOString()
     setBusy(true)
     setError('')
     try {
-      await api(formItem?.id ? `/private/milk-entries/${formItem.id}` : '/private/milk-entries', {
+      const saved = await api(formItem?.id ? `/private/milk-entries/${formItem.id}` : '/private/milk-entries', {
         method: formItem?.id ? 'PUT' : 'POST', body: JSON.stringify(data),
       })
       setFormOpen(false)
       setFormItem(null)
-      await Promise.all([refresh(), refreshSessions(), refreshDailyTotals()])
+      await Promise.all([refresh(), refreshSessions()])
+      setProducerCode('')
+      setQuoteInput({
+        sessionDate: date,
+        sessionType,
+        milkType: 'COW',
+        startReading: '0',
+        endReading: '10',
+        quantityLitres: '10',
+        fat: '3.5',
+        snf: '8.5',
+        depositor: '',
+        noSupply: false,
+      })
+      setQuote(null)
+      setFormOpen(true)
+      setToast(formItem?.id ? 'नोंद अपडेट झाली' : 'दूध नोंद जतन झाली')
+      setCelebrating(!formItem?.id)
+      await openReceipt({
+        ...saved.item,
+        producer_name: saved.item.producer_name || saved.item.producer_name_snapshot,
+        producer_code: saved.item.producer_code || saved.item.producer_code_snapshot,
+      })
+      setReceiptAfterSave(true)
     } catch (cause) { setError(cause.message) } finally { setBusy(false) }
+  }
+
+  async function openReceipt(entry, isSaved = true) {
+    setReceiptEntry(entry)
+    setReceiptIsDraft(!isSaved)
+    setReceiptAfterSave(false)
+    setReceiptStatement(null)
+    setReceiptError('')
+    setReceiptShareMessage('')
+    setReceiptBusy(true)
+    setCopied(false)
+    try {
+      const entryDate = String(entry.session_date || date).slice(0, 10)
+      const [year, month] = entryDate.split('-')
+      const fromDate = `${year}-${month}-01`
+      const toDate = localDate(new Date(Number(year), Number(month), 0))
+      const params = new URLSearchParams({ producerId: entry.producer_id, from: fromDate, to: toDate })
+      setReceiptStatement(await api(`/private/producer-statement?${params}`))
+    } catch (cause) {
+      setReceiptError(cause.message)
+    } finally {
+      setReceiptBusy(false)
+    }
+  }
+
+  async function copyReceipt() {
+    if (!receiptEntry) return
+    const text = [
+      'दूध संकलन पावती',
+      `डेअरी: ${dairyName}`,
+      `उत्पादक: ${receiptEntry.producer_name} (${receiptEntry.producer_code})`,
+      `दिनांक: ${receiptEntry.session_date || date} · ${receiptEntry.session_type === 'MORNING' ? 'सकाळ' : 'संध्याकाळ'}`,
+      `प्रकार: ${receiptEntry.milk_type === 'COW' ? 'गाय' : 'म्हैस'}`,
+      `दूध: ${number(receiptEntry.quantity_litres, 3)} L`,
+      `दर: ₹${number(receiptEntry.rate_per_litre, 4)} / L`,
+      `रक्कम: ₹${number(receiptEntry.amount)}`,
+      ...(receiptStatement ? [`या महिन्याचे दूध: ${number(receiptStatement.totals.quantity, 3)} L`, `या महिन्याची रक्कम: ₹${number(receiptStatement.totals.milkAmount)}`] : []),
+    ].join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setToast('पावती कॉपी झाली')
+    } catch {
+      setReceiptError('कॉपी करता आली नाही. प्रिंट पर्याय वापरा.')
+    }
+  }
+
+  function printReceipt() {
+    document.body.classList.add('print-milk-receipt')
+    const reset = () => document.body.classList.remove('print-milk-receipt')
+    window.addEventListener('afterprint', reset, { once: true })
+    window.print()
+    window.setTimeout(reset, 30000)
+  }
+
+  async function shareReceipt() {
+    if (!receiptEntry || receiptShareBusy) return
+    setReceiptShareBusy(true)
+    setReceiptError('')
+    setReceiptShareMessage('')
+    try {
+      const blob = await createReceiptPng(receiptEntry, dairyName, village, receiptStatement, receiptIsDraft, date)
+      const file = new File([blob], 'dairy-milk-receipt.png', { type: 'image/png' })
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: `${dairyName} · दूध संकलन पावती`,
+          text: `दूध पावती · ${receiptEntry.producer_name}`,
+        })
+      } else {
+        const url = URL.createObjectURL(blob)
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = 'dairy-milk-receipt.png'
+        anchor.click()
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+        setReceiptShareMessage('पावतीची प्रतिमा डाउनलोड झाली. WhatsApp चॅटमध्ये ती जोडा.')
+      }
+    } catch (cause) {
+      if (cause.name !== 'AbortError') setReceiptError(cause.message || 'पावती प्रतिमा शेअर करता आली नाही.')
+    } finally {
+      setReceiptShareBusy(false)
+    }
+  }
+  function closeReceipt() {
+    setReceiptEntry(null)
+    if (receiptAfterSave) {
+      setProducerCode('')
+      setQuoteInput({
+        sessionDate: date, sessionType, milkType: 'COW', startReading: '0', endReading: '10',
+        quantityLitres: '10', fat: '3.5', snf: '8.5', depositor: '', noSupply: false,
+      })
+      setQuote(null)
+      setReceiptAfterSave(false)
+    }
+  }
+  function updateQuantityInput(event) {
+    const value = event.target.value
+    setQuote(null)
+    setQuoteError('')
+    setQuoteInput((previous) => ({
+      ...previous,
+      quantityLitres: value,
+      endReading: value === '' ? previous.startReading : (Number(previous.startReading) + Number(value)).toFixed(3),
+      noSupply: value !== '' && Number(value) === 0,
+    }))
   }
   function updateQuoteInput(event) {
     const { name, value, type, checked } = event.target
@@ -1052,12 +1409,38 @@ function MilkPage({ date }) {
       return next
     })
   }
+  async function uploadProducerPhoto(event) {
+    const photo = event.target.files?.[0]
+    event.target.value = ''
+    if (!photo || !selectedProducer) return
+    if (photo.size > 2 * 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(photo.type)) {
+      setError('फोटो JPG, PNG किंवा WebP असावा आणि 2 MB पेक्षा कमी असावा.')
+      return
+    }
+    setPhotoBusy(true)
+    setError('')
+    try {
+      const upload = new FormData()
+      upload.set('photo', photo)
+      await api(`/private/producers/${selectedProducer.id}/photo`, { method: 'POST', body: upload })
+      setProducers((items) => items.map((producer) => producer.id === selectedProducer.id
+        ? { ...producer, photo_url: `/api/private/producers/${producer.id}/photo?refresh=${Date.now()}` }
+        : producer))
+      setToast('फोटो जतन झाला')
+    } catch (cause) {
+      setError(cause.message)
+    } finally {
+      setPhotoBusy(false)
+    }
+  }
   async function remove(item) {
     if (!window.confirm('Delete this milk collection entry?')) return
-    try { await api(`/private/milk-entries/${item.id}`, { method: 'DELETE' }); await Promise.all([refresh(), refreshSessions(), refreshDailyTotals()]) } catch (cause) { setError(cause.message) }
+    try { await api(`/private/milk-entries/${item.id}`, { method: 'DELETE' }); await Promise.all([refresh(), refreshSessions()]) } catch (cause) { setError(cause.message) }
   }
   function openForm(item = null) {
     setFormItem(item)
+    setProducerCode(item?.producer_code || producers[0]?.producer_code || '')
+    if (item?.session_type) setSessionType(item.session_type)
     const dateTime = item
       ? new Date(new Date(item.collected_at).getTime() - new Date().getTimezoneOffset() * 60000)
       : new Date(`${date}T${sessionType === 'MORNING' ? '08:00' : '17:00'}`)
@@ -1066,10 +1449,12 @@ function MilkPage({ date }) {
       sessionDate: item?.session_date || date,
       sessionType: item?.session_type || sessionType,
       milkType: item?.milk_type || 'COW',
-      startReading: item?.start_reading ?? '',
-      endReading: item?.end_reading ?? '',
-      fat: item?.fat ?? '',
-      snf: item?.snf ?? '',
+      startReading: String(item?.start_reading ?? '0'),
+      endReading: String(item?.end_reading ?? '10'),
+      quantityLitres: String(item?.quantity_litres ?? '10'),
+      fat: item?.fat ?? '3.5',
+      snf: item?.snf ?? '8.5',
+      depositor: item?.depositor_name || '',
       noSupply: Number(item?.quantity_litres) === 0,
     })
     setQuote(null)
@@ -1077,69 +1462,97 @@ function MilkPage({ date }) {
     setQuoteBusy(false)
     setFormOpen(true)
   }
-  return <>
+  function previewReceipt() {
+    if (!selectedProducer || !quote) {
+      setError('उत्पादकाचा योग्य कोड आणि दरपत्रकाची माहिती भरा.')
+      return
+    }
+    openReceipt({
+      producer_id: selectedProducer.id,
+      producer_code: selectedProducer.producer_code,
+      producer_name: selectedProducer.name,
+      depositor_name: quoteInput.depositor,
+      session_date: quoteInput.sessionDate || date,
+      session_type: sessionType,
+      milk_type: quoteInput.milkType,
+      start_reading: quoteInput.startReading,
+      end_reading: quoteInput.endReading,
+      quantity_litres: quote.quantity,
+      fat: quoteInput.fat,
+      snf: quoteInput.snf,
+      rate_per_litre: quote.rate,
+      amount: quote.amount,
+    }, false)
+  }
+  return <div className="milk-screen">
     {error && <Notice message={error} />}
-    <section className="milk-collection-hero">
-      <img src={dairyBackdrop} alt="" />
-      <div className="milk-collection-hero-copy">
-        <p>DAILY COLLECTION</p>
-        <h2><span aria-hidden="true">🥛</span> दूध संकलन</h2>
-        <span>{new Date(`${date}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</span>
-      </div>
-      <span className="milk-collection-hero-mark" aria-hidden="true">🐄</span>
-    </section>
-    <section className="milk-collection-stats" aria-label="Selected date milk totals">
-      <article className="milk-collection-stat milk-stat-volume"><span className="milk-stat-icon"><Milk size={20} /></span><span className="milk-stat-label">एकूण दूध</span><strong>{dailyTotals ? number(dailyTotals.quantity, 3) : '—'} <small>L</small></strong></article>
-      <article className="milk-collection-stat milk-stat-amount"><span className="milk-stat-icon"><IndianRupee size={19} /></span><span className="milk-stat-label">एकूण रक्कम</span><strong>₹{dailyTotals ? number(dailyTotals.amount) : '—'}</strong></article>
-      <article className="milk-collection-stat milk-stat-entries"><span className="milk-stat-icon"><Users size={19} /></span><span className="milk-stat-label">नोंदी</span><strong>{dailyTotals ? number(Number(dailyTotals.cow_count) + Number(dailyTotals.buffalo_count), 0) : '—'}</strong></article>
-    </section>
-    <section className="panel session-toolbar">
-      <div>
-        <p className="section-kicker">COLLECTION SESSION</p>
-        <h2>{sessionType === 'MORNING' ? 'सकाळ · Morning' : 'संध्याकाळ · Evening'}</h2>
-        <p className="muted">{selectedSession ? `${selectedSession.supplied_count} of ${selectedSession.producer_count} producers supplied · ${selectedSession.pending_count} pending` : 'Loading session status…'}</p>
-      </div>
-      <div className="session-card-actions">
-        <div className="milk-session-switch" role="group" aria-label="Select collection session"><button type="button" className={sessionType === 'MORNING' ? 'milk-session-active' : ''} onClick={() => setSessionType('MORNING')}>🌅 सकाळ</button><button type="button" className={sessionType === 'EVENING' ? 'milk-session-active' : ''} onClick={() => setSessionType('EVENING')}>🌙 संध्याकाळ</button></div>
-        {selectedSession?.status === 'NOT_STARTED' && <button className="button button-primary" onClick={() => changeSession('start')}>Start session</button>}
-        {selectedSession?.status === 'OPEN' && <>
-          <span className="session-status session-open">OPEN</span>
-          <button className="button button-quiet" onClick={() => changeSession('close')}>Close session</button>
-        </>}
-        {selectedSession?.status === 'CLOSED' && <button className="button button-secondary" onClick={() => changeSession('reopen')}>Reopen for correction</button>}
-      </div>
-    </section>
-    <section className="panel data-panel">
-      <div className="data-toolbar">
-        <div className="milk-filters"><div className="filter-dates"><label>From<input type="date" value={from} onChange={(event) => { setPage(1); setFrom(event.target.value) }} /></label><label>To<input type="date" value={to} onChange={(event) => { setPage(1); setTo(event.target.value) }} /></label></div><label className="type-filter">Milk type<select value={milkType} onChange={(event) => { setPage(1); setMilkType(event.target.value) }}><option value="">All types</option><option value="COW">Cow</option><option value="BUFFALO">Buffalo</option></select></label><div className="search-box milk-search"><Search size={16} /><input aria-label="Search milk entries" placeholder="Search producer…" value={search} onChange={(event) => setSearch(event.target.value)} /></div></div>
-        <button className="button button-primary" onClick={() => openForm()} disabled={selectedSession?.status !== 'OPEN'}><Plus size={16} /> Record milk</button>
-      </div>
-      {!entries.length ? <EmptyState title="No collection entries found" text={selectedSession?.status === 'OPEN' ? 'Add a rate chart and producer before recording a milk collection.' : 'Start a collection session before recording milk. No entry is created for a producer who has not supplied.'} action={selectedSession?.status === 'OPEN' ? () => openForm() : undefined} /> : <div className="table-scroll"><table><thead><tr><th>DATE / SESSION</th><th>PRODUCER</th><th>TYPE</th><th>READING</th><th>FAT / SNF</th><th>QTY</th><th>RATE</th><th>AMOUNT</th><th>ACTIONS</th></tr></thead><tbody>{entries.map((item) => <tr key={item.id}><td>{item.session_date || new Date(item.collected_at).toLocaleDateString('en-IN')}<small className="table-sub">{item.session_type || 'Legacy entry'}</small></td><td><strong>{item.producer_name}</strong><small className="table-sub">#{item.producer_code}</small></td><td><span className={`milk-badge ${item.milk_type === 'COW' ? 'badge-cow' : 'badge-buffalo'}`}>{item.milk_type}</span>{Number(item.quantity_litres) === 0 && <small className="table-sub">No supply recorded</small>}</td><td>{number(item.start_reading, 3)} → {number(item.end_reading, 3)}</td><td>{item.fat}% / {item.snf}%</td><td>{number(item.quantity_litres, 3)} L</td><td>₹{number(item.rate_per_litre, 4)}</td><td><strong>₹{number(item.amount)}</strong></td><td className="row-actions"><button className="small-action" onClick={() => openForm(item)}>Edit</button><button className="small-action danger" onClick={() => remove(item)}>Delete</button></td></tr>)}</tbody></table></div>}
-      {total > 20 && <Pagination page={page} total={total} pageSize={20} onChange={setPage} />}
-    </section>
-    {formOpen && <Modal title={`${formItem ? 'Edit' : 'Record'} milk collection`} onClose={() => { setFormOpen(false); setFormItem(null) }}><form className="form-stack modal-form" onSubmit={save}><div className="field-grid">
-      <label>Producer<select name="producerId" required defaultValue={formItem?.producer_id || ''}><option value="" disabled>Select producer</option>{producers.map((producer) => <option key={producer.id} value={producer.id}>{producer.producer_code} · {producer.name}</option>)}</select></label>
-      <input type="hidden" name="sessionDate" value={quoteInput?.sessionDate || date} readOnly />
-      <input type="hidden" name="sessionType" value={quoteInput?.sessionType || sessionType} readOnly />
-      <div className="session-form-context"><strong>{quoteInput?.sessionDate || date}</strong><span>{(quoteInput?.sessionType || sessionType) === 'MORNING' ? 'सकाळ · Morning' : 'संध्याकाळ · Evening'}</span></div>
-      <label>Collection date & time<input name="collectedAt" type="datetime-local" required defaultValue={dateTimeValue} /></label>
-      <label>Milk type<select name="milkType" value={quoteInput?.milkType || 'COW'} onChange={updateQuoteInput}><option value="COW">Cow · गाय</option><option value="BUFFALO">Buffalo · म्हैस</option></select></label>
-      <label>Start reading<input name="startReading" type="number" step="0.001" min="0" required value={quoteInput?.startReading ?? ''} onChange={updateQuoteInput} /></label>
-      <label>End reading<input name="endReading" type="number" step="0.001" min="0" required value={quoteInput?.endReading ?? ''} onChange={updateQuoteInput} /></label>
-      <label className="field-wide zero-supply-option"><input name="noSupply" type="checkbox" checked={Boolean(quoteInput?.noSupply)} onChange={updateQuoteInput} /><span>Record explicit zero milk (use the same start and end reading). This is separate from a producer with no entry.</span></label>
-      <label>Fat (%)<input name="fat" type="number" step="0.01" min="0" max="20" required value={quoteInput?.fat ?? ''} onChange={updateQuoteInput} /></label>
-      <label>SNF (%)<input name="snf" type="number" step="0.01" min="0" max="20" required value={quoteInput?.snf ?? ''} onChange={updateQuoteInput} /></label>
-      <label className="field-wide">Notes<input name="notes" defaultValue={formItem?.notes || ''} /></label>
-    </div>
-    <div className={`milk-quote ${quoteError ? 'milk-quote-error' : ''}`}>
-      {quoteBusy ? <span>Checking the matching rate chart…</span> : quoteError ? <span>{quoteError}</span> : quote ? <>
-        <div><small>QUANTITY</small><strong>{number(quote.quantity, 3)} L</strong></div>
-        <div><small>RATE / LITRE</small><strong>₹{number(quote.rate, 4)}</strong></div>
-        <div><small>ESTIMATED AMOUNT</small><strong>₹{number(quote.amount)}</strong></div>
-      </> : <span>Enter readings and Fat/SNF to preview the applicable rate and amount.</span>}
-    </div>
-    {error && <Notice message={error} />}{!producers.length && <Notice message="Add a producer before recording milk." />}<div className="modal-actions"><button type="button" className="button button-quiet" onClick={() => { setFormOpen(false); setFormItem(null) }}>Cancel</button><button className="button button-primary" disabled={busy || !producers.length || !quote}>{busy ? 'Saving…' : 'Save entry'} <Check size={16} /></button></div></form></Modal>}
-  </>
+    {toast && <div className="milk-reference-toast" role="status">{toast} {celebrating && '🎉'}</div>}
+    {celebrating && <div className="milk-confetti" aria-hidden="true">{['🥛', '✨', '💧', '🐄', '⭐', '💚', '🌼', '🎉'].map((emoji, index) => <span key={`${emoji}-${index}`} style={{ '--confetti-index': index }}>{emoji}</span>)}</div>}
+    <header className="milk-reference-header">
+      <i className="milk-header-drop milk-drop-one" aria-hidden="true" /><i className="milk-header-drop milk-drop-two" aria-hidden="true" /><i className="milk-header-drop milk-drop-three" aria-hidden="true" />
+      <div className="milk-reference-topline"><div className="milk-reference-brand"><span aria-hidden="true">🥛</span><div><h1>दूध संकलन</h1><p>{[dairyName, village].filter(Boolean).join(' · ') || 'दैनंदिन दूध नोंद'}</p></div></div><div className="milk-reference-clock"><i />{clock.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</div></div>
+      <p className="milk-reference-greeting">{greeting}! आजचे दूध संकलन सुरू करूया</p>
+      <svg className="milk-reference-wave" viewBox="0 0 400 26" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 C 50 30, 110 0, 190 14 S 330 28, 400 8 V26 H0Z" /></svg>
+    </header>
+    <form id="milk-entry-form" className="milk-reference-form" onSubmit={save}>
+      <section className="milk-reference-card" aria-label="शेतकरी">
+        <div className="milk-reference-farmer">
+          <label className="milk-reference-avatar" title="उत्पादकाचा फोटो निवडा">
+            <span className="milk-avatar-ring" aria-hidden="true" />
+            {selectedProducer?.photo_url ? <img src={selectedProducer.photo_url} alt={`${selectedProducer.name} फोटो`} /> : <span className="milk-avatar-emoji">{quoteInput.milkType === 'BUFFALO' ? '🐃' : '🐄'}</span>}
+            <i>{photoBusy ? '…' : '📷'}</i>
+            <input type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" disabled={!selectedProducer || photoBusy} onChange={uploadProducerPhoto} />
+          </label>
+          <div className="milk-reference-farmer-fields">
+            <div className="milk-reference-code-row"><label className="milk-reference-field"><span>🔢 कोड</span><input value={producerCode} onChange={(event) => setProducerCode(event.target.value)} autoComplete="off" list="milk-producer-codes" placeholder="1" /></label><label className="milk-reference-field"><span>👤 उत्पादकाचे नाव</span><input value={selectedProducer?.name || ''} readOnly placeholder="कोड निवडा" /></label></div>
+            <datalist id="milk-producer-codes">{producers.map((producer) => <option key={producer.id} value={producer.producer_code}>{producer.name}</option>)}</datalist>
+            <input type="hidden" name="producerId" value={selectedProducer?.id || ''} />
+          </div>
+        </div>
+        <label className="milk-reference-field milk-reference-depositor"><span>🧑‍🌾 जमाकर्ता (पावतीवर दिसेल)</span><input name="depositor" value={quoteInput.depositor || ''} onChange={updateQuoteInput} placeholder="जमाकर्त्याचे नाव" /></label>
+      </section>
+      <section className="milk-reference-card" aria-label="दूध माहिती">
+        <div className="milk-reference-grid-two">
+          <label className="milk-reference-field"><span>📅 दिनांक</span><input type="date" value={date} onChange={(event) => { setPage(1); onDateChange?.(event.target.value); setQuoteInput((previous) => ({ ...previous, sessionDate: event.target.value })) }} /></label>
+          <fieldset className="milk-reference-choice"><legend>वेळ</legend><div className="milk-reference-segment"><button type="button" className={sessionType === 'MORNING' ? 'is-selected' : ''} onClick={() => { setSessionType('MORNING'); setQuoteInput((previous) => ({ ...previous, sessionType: 'MORNING' })) }}>☀️ सकाळ</button><button type="button" className={sessionType === 'EVENING' ? 'is-selected' : ''} onClick={() => { setSessionType('EVENING'); setQuoteInput((previous) => ({ ...previous, sessionType: 'EVENING' })) }}>🌙 संध्याकाळ</button></div></fieldset>
+        </div>
+        <fieldset className="milk-reference-choice"><legend>दूध प्रकार</legend><div className="milk-reference-segment"><button type="button" className={quoteInput.milkType === 'COW' ? 'is-selected' : ''} onClick={() => updateQuoteInput({ target: { name: 'milkType', value: 'COW' } })}>🐄 गाय</button><button type="button" className={quoteInput.milkType === 'BUFFALO' ? 'is-selected' : ''} onClick={() => updateQuoteInput({ target: { name: 'milkType', value: 'BUFFALO' } })}>🐃 म्हैस</button></div></fieldset>
+        <input type="hidden" name="sessionDate" value={quoteInput.sessionDate || date} />
+        <input type="hidden" name="sessionType" value={sessionType} />
+        <input type="hidden" name="milkType" value={quoteInput.milkType} />
+        <input type="hidden" name="startReading" value={quoteInput.startReading} />
+        <input type="hidden" name="endReading" value={quoteInput.endReading} />
+        <input type="hidden" name="noSupply" value={quoteInput.noSupply ? 'on' : ''} />
+        <input type="hidden" name="collectedAt" value={new Date(formItem?.id && dateTimeValue ? dateTimeValue : `${quoteInput.sessionDate || date}T${sessionType === 'MORNING' ? '08:00' : '17:00'}`).toISOString()} />
+        <label className="milk-reference-field milk-reference-litres"><span>⚖️ मात्रा (लिटर)</span><div className="milk-reference-input-wrap"><input name="quantityLitres" type="number" inputMode="decimal" step="0.001" min="0" value={quoteInput.quantityLitres} onChange={updateQuantityInput} /><b>लि.</b></div></label>
+        <div className="milk-reference-grid-two"><label className="milk-reference-field"><span>🧈 FAT</span><div className="milk-reference-input-wrap"><input name="fat" type="number" inputMode="decimal" step="0.01" min="0" max="20" value={quoteInput.fat} onChange={updateQuoteInput} /><b>%</b></div></label><label className="milk-reference-field"><span>🧪 SNF</span><div className="milk-reference-input-wrap"><input name="snf" type="number" inputMode="decimal" step="0.01" min="0" max="20" value={quoteInput.snf} onChange={updateQuoteInput} /><b>%</b></div></label></div>
+      </section>
+      <section className={`milk-reference-card milk-reference-summary ${quoteError ? 'has-error' : ''}`} aria-label="दर व रक्कम" aria-live="polite">
+        <svg className="milk-reference-can" viewBox="0 0 120 150" aria-hidden="true"><defs><clipPath id="milkCanClip"><rect x="22" y="36" width="76" height="104" rx="16" /></clipPath></defs><rect className="can-body" x="22" y="36" width="76" height="104" rx="16" /><g clipPath="url(#milkCanClip)"><g className="milk-can-fill" style={{ transform: `translateY(${144 - milkFillPercent * 1.14}px)` }}><g className="milk-can-wave"><path d="M0 6 q15 -8 30 0 t30 0 t30 0 t30 0 t30 0 t30 0 t30 0 t30 0 V150 H0Z" /></g></g></g><rect className="can-cap" x="36" y="18" width="48" height="22" rx="7" /><rect className="can-cap" x="30" y="8" width="60" height="12" rx="6" /><path className="can-ticks" d="M104 60h8M104 88h8M104 116h8" /></svg>
+        <div className="milk-reference-summary-stats"><div><small>🏷️ दर (Rate)</small><b key={quote?.rate}>{quoteBusy ? '…' : quote ? `₹${number(quote.rate, 2)}` : '—'}</b></div><div><small>💰 एकूण रक्कम</small><b key={quote?.amount}>{quoteBusy ? '…' : quote ? `₹${number(quote.amount)}` : '—'}</b></div><p>{quoteError.includes('No matching rate') ? <>या तारीख, दूध प्रकार, FAT आणि SNF साठी दरपत्रकाची नोंद नाही. <button type="button" className="milk-rate-setup-link" onClick={() => navigate('/rates')}>दरपत्रक सेट करा</button></> : quoteError || (quote ? `${number(quote.quantity, 3)} लि. × ₹${number(quote.rate, 2)} = ₹${number(quote.amount)}` : 'योग्य FAT/SNF साठी दरपत्रकाचा दर वापरला जाईल.')}</p></div>
+      </section>
+      <section className="milk-reference-card milk-reference-list" aria-label="संकलन यादी">
+        <div className="milk-reference-list-heading"><h2>📋 {date === localDate() ? 'आजचे संकलन' : 'संकलन'}</h2><span>{entries.length} नोंदी · {number(entries.reduce((sum, item) => sum + Number(item.quantity_litres), 0), 3)} लि. · ₹{number(entries.reduce((sum, item) => sum + Number(item.amount), 0))}</span></div>
+        {entries.length ? <div className="milk-reference-rows">
+          {entries.map((item) => <article className="milk-reference-row" key={item.id}>
+            <button type="button" className="milk-reference-row-open" onClick={() => openReceipt(item)}>
+              <span className="milk-reference-row-avatar">{item.milk_type === 'COW' ? '🐄' : '🐃'}</span>
+              <span className="milk-reference-row-who"><b>{item.producer_name}</b><small>कोड {item.producer_code} · {item.session_type === 'MORNING' ? '☀️ सकाळ' : '🌙 संध्याकाळ'} · FAT {item.fat} · SNF {item.snf}</small></span>
+              <span className="milk-reference-row-number"><b>{number(item.quantity_litres, 3)} लि.</b><small>₹{number(item.amount)}</small></span>
+            </button>
+            <div className="milk-reference-row-actions">
+              <button type="button" className="milk-reference-row-edit" onClick={() => openForm(item)} aria-label={`${item.producer_name} नोंद संपादित करा`}><Pencil size={15} /></button>
+              <button type="button" className="milk-reference-row-edit milk-reference-row-delete" onClick={() => remove(item)} aria-label={`${item.producer_name} नोंद हटवा`}><Trash2 size={15} /></button>
+            </div>
+          </article>)}
+        </div> : <div className="milk-reference-empty"><span>🥛</span><b>अजून नोंद नाही</b><small>माहिती भरून “संकलन जतन करा” दाबा.</small></div>}
+        {total > entries.length && <Pagination page={page} total={total} pageSize={20} onChange={setPage} />}
+      </section>
+    </form>
+    <div className="milk-reference-actions"><button type="button" className="milk-reference-print" onClick={previewReceipt} disabled={!selectedProducer || !quote}>पावती प्रिंट करा <span>🖨️</span></button><button type="submit" form="milk-entry-form" className="milk-reference-save" disabled={busy || selectedSession?.status !== 'OPEN'}>{busy ? 'जतन होत आहे…' : 'संकलन जतन करा'} <span>✅</span></button></div>
+    {selectedSession?.status !== 'OPEN' && <div className="milk-reference-session-warning">{selectedSession?.status === 'CLOSED' ? 'सत्र बंद आहे. नोंद करण्यासाठी ते पुन्हा उघडा.' : 'नोंद करण्यापूर्वी सत्र सुरू करा.'}<button type="button" onClick={() => changeSession(selectedSession?.status === 'CLOSED' ? 'reopen' : 'start')}>{selectedSession?.status === 'CLOSED' ? 'पुन्हा उघडा' : 'सत्र सुरू करा'}</button></div>}
+    {receiptEntry && <Modal title="" onClose={closeReceipt} backdropClassName="milk-receipt-backdrop" modalClassName="milk-receipt-modal"><div className="milk-receipt-top">{dairyName}</div><div className="milk-receipt-meta"><span>{new Date(`${String(receiptEntry.session_date || date).slice(0, 10)}T00:00:00`).toLocaleDateString('mr-IN')}</span><span>{receiptEntry.session_type === 'MORNING' ? '☀️ सकाळ' : '🌙 संध्याकाळ'}</span></div><div className="milk-receipt-center"><h3>{selectedProducer?.name === receiptEntry.producer_name ? selectedProducer.village || village || 'दूध संकलन' : village || 'दूध संकलन'}</h3><p>🥛 दूध संकलन पावती</p></div><div className="milk-receipt-body"><dl><dt>शेतकरी</dt><dd>{receiptEntry.producer_name} · {receiptEntry.producer_code}</dd><dt>दूध प्रकार</dt><dd>{receiptEntry.milk_type === 'COW' ? 'गाय' : 'म्हैस'}</dd><dt>मात्रा (लिटर)</dt><dd>{number(receiptEntry.quantity_litres, 3)} लि.</dd><dt>FAT / SNF</dt><dd>{receiptEntry.fat}% / {receiptEntry.snf}%</dd><dt>दर (₹)</dt><dd>{number(receiptEntry.rate_per_litre, 2)} / लि.</dd>{receiptEntry.depositor_name && <><dt>जमाकर्ता</dt><dd>{receiptEntry.depositor_name}</dd></>}</dl><div className="milk-receipt-amount">₹ {number(receiptEntry.amount)}</div><div className="milk-receipt-thanks"><b>धन्यवाद!</b><span>🌳 कागद वाचवा, झाडे वाचवा 🌳</span></div></div><div className="milk-receipt-month"><div>महिन्याचे एकूण दूध : {number(Number(receiptStatement?.totals.quantity || 0) + (receiptIsDraft ? Number(receiptEntry.quantity_litres) : 0), 3)} लि.</div><div>महिन्याची एकूण रक्कम : ₹ {number(Number(receiptStatement?.totals.milkAmount || 0) + (receiptIsDraft ? Number(receiptEntry.amount) : 0))}</div></div>{receiptBusy && <p className="milk-receipt-loading">मासिक एकूण लोड होत आहे…</p>}{receiptError && <Notice message={receiptError} />}{receiptShareMessage && <p className="milk-receipt-share-message" role="status">{receiptShareMessage}</p>}<div className="milk-receipt-actions"><button type="button" onClick={closeReceipt}>बंद</button><button type="button" onClick={copyReceipt}>📋 {copied ? 'कॉपी झाले' : 'कॉपी'}</button><button type="button" onClick={shareReceipt} disabled={receiptShareBusy || receiptBusy}>{receiptShareBusy ? 'तयार होत आहे…' : <><MessageCircle size={16} /> WhatsApp वर प्रतिमा</>}</button></div></Modal>}
+  </div>
 }
 
 function Pagination({ page, total, pageSize, onChange }) {
@@ -1417,21 +1830,21 @@ function UserPhotoSettings({ user, onProfile }) {
     <div>
       <p className="section-kicker">YOUR ACCOUNT</p>
       <h2>Profile photo</h2>
-      <p className="muted">Add a photo so your profile is easy to recognize.</p>
+      <p className="muted">प्रोफाइल ओळखण्यासाठी तुमचा फोटो जोडा.</p>
     </div>
     <div className="profile-photo-content">
       <div className="profile-photo-preview" aria-label="Profile photo preview">
         {(preview || user.photoUrl) ? <img src={preview || user.photoUrl} alt="" /> : <UserAvatar user={user} />}
       </div>
       <div className="profile-photo-controls">
-        <label className="photo-upload-button"><ImagePlus size={15} /> {user.photoUrl ? 'Choose a new photo' : 'Choose your photo'}
+        <label className="photo-upload-button"><ImagePlus size={15} /> {user.photoUrl ? 'नवीन फोटो निवडा' : 'फोटो निवडा'}
           <input type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" onChange={choosePhoto} />
         </label>
-        <span className="form-note">JPEG, PNG or WebP · maximum 2 MB. Your photo appears on your profile.</span>
+        <span className="form-note">JPEG, PNG किंवा WebP · कमाल 2 MB.</span>
         {message && <Notice message={message} success={message.includes('updated') || message.includes('removed')} />}
         <div className="profile-photo-actions">
-          {file && <button className="button button-primary" onClick={savePhoto} disabled={busy}>{busy ? 'Saving…' : 'Save photo'} <Check size={16} /></button>}
-          {user.photoUrl && !file && <button className="button button-secondary" onClick={removePhoto} disabled={busy}>{busy ? 'Removing…' : 'Remove photo'}</button>}
+          {file && <button className="button button-primary" onClick={savePhoto} disabled={busy}>{busy ? 'जतन होत आहे…' : 'फोटो जतन करा'} <Check size={16} /></button>}
+          {user.photoUrl && !file && <button className="button button-secondary" onClick={removePhoto} disabled={busy}>{busy ? 'हटवत आहे…' : 'फोटो हटवा'}</button>}
         </div>
       </div>
     </div>
@@ -1451,13 +1864,13 @@ function SettingsPage({ user, onProfile }) {
       setMessage('Dairy profile updated.')
     } catch (error) { setMessage(error.message) } finally { setBusy(false) }
   }
-  return <><UserPhotoSettings user={user} onProfile={onProfile} /><section className="panel settings-panel"><div className="panel-heading"><div><p className="section-kicker">DAIRY IDENTITY</p><h2>Profile & display name</h2></div><div className="settings-logo"><Logo compact name={user.dairy.displayName} /></div></div><p className="muted">The display name appears in your workspace and reports. Logo upload can be connected when a private file storage service is configured.</p><form className="form-stack settings-form" onSubmit={save}><label>Registered dairy name<input name="registeredName" required defaultValue={user.dairy.registeredName} /></label><label>Display name<input name="displayName" required defaultValue={user.dairy.displayName} /></label><div className="form-note">Default format is “[business name] Dudh Dairy”. You can edit the display name here.</div><label>Village / city<input name="village" required defaultValue={user.dairy.village} /></label><label>Address<input name="address" defaultValue={user.dairy.address || ''} /></label>{message && <Notice message={message} success={message.includes('updated')} />}<button className="button button-primary" disabled={busy}>{busy ? 'Saving…' : 'Save profile'} <Check size={16} /></button></form></section></>
+  return <main className="dairy-module-screen settings-module-screen"><DairyModuleHeader emoji="⚙️" title="प्रोफाइल सेटिंग्ज" subtitle="डेअरीची माहिती आणि खाते ओळख व्यवस्थापित करा" /><UserPhotoSettings user={user} onProfile={onProfile} /><section className="panel settings-panel"><div className="panel-heading"><div><p className="section-kicker">DAIRY IDENTITY</p><h2>डेअरी माहिती</h2></div><div className="settings-logo"><Logo compact name={user.dairy.displayName} /></div></div><form className="form-stack settings-form" onSubmit={save}><label>नोंदणीकृत डेअरी नाव<input name="registeredName" required defaultValue={user.dairy.registeredName} /></label><label>दिसणारे नाव<input name="displayName" required defaultValue={user.dairy.displayName} /></label><label>गाव / शहर<input name="village" required defaultValue={user.dairy.village} /></label><label>पत्ता<input name="address" defaultValue={user.dairy.address || ''} /></label>{message && <Notice message={message} success={message.includes('updated')} />}<div className="dairy-entry-actions settings-save-actions"><button className="dairy-action-primary" disabled={busy}>{busy ? 'जतन होत आहे…' : 'माहिती जतन करा'} ✅</button></div></form></section></main>
 }
 
-function PageContent({ path, user, date, onProfile }) {
+function PageContent({ path, user, date, onProfile, onDateChange }) {
   if (path === '/dashboard') return <Dashboard user={user} date={date} />
   if (path === '/producers') return <ProducersPage />
-  if (path === '/milk') return <MilkPage date={date} />
+  if (path === '/milk') return <MilkPage date={date} onDateChange={onDateChange} dairyName={user.dairy.displayName} village={user.dairy.village} />
   if (path === '/rates') return <RatesPage />
   if (path === '/feed') return <FeedPage />
   if (path === '/advances') return <AdvancesPage />
@@ -1466,13 +1879,13 @@ function PageContent({ path, user, date, onProfile }) {
   return <Dashboard user={user} date={date} />
 }
 
-function Modal({ title, onClose, children }) {
+function Modal({ title, onClose, children, backdropClassName = '', modalClassName = '' }) {
   useEffect(() => {
     function closeOnEscape(event) { if (event.key === 'Escape') onClose() }
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [onClose])
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-header"><h2 id="modal-title">{title}</h2><button className="icon-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>{children}</section></div>
+  return <div className={`modal-backdrop ${backdropClassName}`} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><section className={`modal ${modalClassName}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-header"><h2 id="modal-title">{title}</h2><button className="icon-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>{children}</section></div>
 }
 
 function EmptyState({ title, text, action }) {
